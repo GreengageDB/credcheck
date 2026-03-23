@@ -27,7 +27,10 @@
 #include "access/genam.h"
 #include "access/heapam.h"
 #include "access/htup_details.h"
+#if PG_VERSION_NUM >= 90500
 #include "access/parallel.h"
+#endif
+#include "access/xact.h"
 
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
@@ -59,9 +62,19 @@
 #include "utils/rel.h"
 #include "utils/syscache.h"
 #include "utils/timestamp.h"
+#if PG_VERSION_NUM >= 100000
 #include "utils/varlena.h"
+#endif
 
+#ifdef GP_VERSION_NUM
+#include "cdb/cdbvars.h"
+#endif
+
+#if PG_VERSION_NUM >= 90500
 #define NOT_IN_PARALLEL_WORKER (ParallelWorkerNumber < 0)
+#else
+#define NOT_IN_PARALLEL_WORKER (true)
+#endif
 
 /* Default passord encryption */
 #define Password_encryption = PASSWORD_TYPE_SCRAM_SHA_256;
@@ -90,8 +103,8 @@ static bool no_password_logging    = true;
 #define table_close(r,l)        heap_close(r,l)
 #endif
 
-#if PG_VERSION_NUM < 100000
-#error Minimum version of PostgreSQL required is 10
+#if PG_VERSION_NUM < 90400
+#error Minimum version of PostgreSQL required is 9.4
 #endif
 
 /* Define ProcessUtility hook proto/parameters following the PostgreSQL version */
@@ -110,11 +123,18 @@ static bool no_password_logging    = true;
 					QueryCompletion *qc
 #define PEL_PROCESSUTILITY_ARGS pstmt, queryString, context, params, queryEnv, dest, qc
 #else
+#if PG_VERSION_NUM >= 100000
 #define PEL_PROCESSUTILITY_PROTO PlannedStmt *pstmt, const char *queryString, \
 					ProcessUtilityContext context, ParamListInfo params, \
 					QueryEnvironment *queryEnv, DestReceiver *dest, \
 					char *completionTag
 #define PEL_PROCESSUTILITY_ARGS pstmt, queryString, context, params, queryEnv, dest, completionTag
+#else
+#define PEL_PROCESSUTILITY_PROTO Node *parsetree, const char *queryString, \
+					ProcessUtilityContext context, ParamListInfo params, \
+					DestReceiver *dest, char *completionTag
+#define PEL_PROCESSUTILITY_ARGS parsetree, queryString, context, params, dest, completionTag
+#endif
 #endif
 #endif
 
@@ -1400,6 +1420,10 @@ _PG_init(void)
 				gettext_noop("comma separated list of username to exclude from max authentication failure check"), NULL,
 				&max_auth_whitelist, "", PGC_SUSET, 0, check_whitelist, NULL, NULL);
 
+#ifdef GP_VERSION_NUM
+	if (!IS_QUERY_DISPATCHER()) return;
+#endif
+
 #if PG_VERSION_NUM < 150000
 	EmitWarningsOnPlaceholders("credcheck");
 	EmitWarningsOnPlaceholders("credcheck_internal");
@@ -1410,9 +1434,17 @@ _PG_init(void)
          * resources in pgph_shmem_startup().
          */
         RequestAddinShmemSpace(pgph_memsize());
+#if PG_VERSION_NUM >= 90600
         RequestNamedLWLockTranche(PGPH_TRANCHE_NAME, 1);
+#else
+        RequestAddinLWLocks(1);
+#endif
         RequestAddinShmemSpace(pgaf_memsize());
+#if PG_VERSION_NUM >= 90600
         RequestNamedLWLockTranche(PGAF_TRANCHE_NAME, 1);
+#else
+        RequestAddinLWLocks(1);
+#endif
 #else
 	MarkGUCPrefixReserved("credcheck");
 	MarkGUCPrefixReserved("credcheck_internal");
@@ -1469,7 +1501,9 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	/* If real user connection and top level (not SPI re-enter, etc) */
 	if (MyProcPort != NULL && context == PROCESS_UTILITY_TOPLEVEL && NOT_IN_PARALLEL_WORKER)
 	{
+#if PG_VERSION_NUM >= 100000
 		Node *parsetree = pstmt->utilityStmt;
+#endif
 
 		if (!is_in_whitelist(MyProcPort->user_name, username_whitelist))
 		{
@@ -1524,11 +1558,14 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 			{
 				AlterRoleStmt *stmt = (AlterRoleStmt *)parsetree;
 				ListCell      *option;
+#if PG_VERSION_NUM >= 120000
 				char          *password;
 				bool           save_password = false;
+#endif
 				DefElem    *dvalidUntil = NULL;
 				DefElem    *dpassword = NULL;
 
+#if PG_VERSION_NUM >= 90500
 				/*
 				 * Protect against attacks via ALTER ROLE current_role.
 				 *
@@ -1547,6 +1584,11 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 				/* verify if the user in whitelisted or not */
 				if (is_in_whitelist(stmt->role->rolename, username_whitelist))
 					break;
+#else
+				/* verify if the user in whitelisted or not */
+				if (is_in_whitelist(stmt->role, username_whitelist))
+					break;
+#endif
 
 				/* Extract options from the statement node tree */
 				foreach(option, stmt->options)
@@ -1607,7 +1649,11 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 					j2date(julian, &tm->tm_year, &tm->tm_mon, &tm->tm_mday);
 					validuntil = malloc(sizeof(char)*11);
 					sprintf(validuntil, "%d-%d-%d", tm->tm_year, tm->tm_mon, tm->tm_mday);
+#if PG_VERSION_NUM >= 100000
 					dvalidUntil = makeDefElem("validUntil", (Node *) makeString(validuntil), -1);
+#else
+					dvalidUntil = makeDefElem("validUntil", (Node *) makeString(validuntil));
+#endif
 					((AlterRoleStmt *)parsetree)->options = lappend(((AlterRoleStmt *)parsetree)->options, dvalidUntil);
 					/*
 					 * As we modify the VALID UNTIL clause it will generate an error message
@@ -1616,7 +1662,11 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 					 * 	on role "..." may alter this role.
 					 * force use of the superuser privilege to modify the password user.
 					 */
+#if PG_VERSION_NUM >= 90500
 					if (!superuser() && get_rolespec_oid(stmt->role, false) == GetUserId())
+#else
+					if (!superuser() && get_role_oid(stmt->role, false) == GetUserId())
+#endif
 						use_superuser_priv = true;
 				}
 
@@ -1647,7 +1697,11 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 				if (force_change_password)
 				{
 					/* RESET variable, valuestr = NULL*/
+#if PG_VERSION_NUM >= 90500
 					set_force_change_password(InvalidOid, get_role_oid(stmt->role->rolename, true), NULL);
+#else
+					set_force_change_password(InvalidOid, get_role_oid(stmt->role, true), NULL);
+#endif
 					force_change_password = false;
 				}
 
@@ -1661,8 +1715,10 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 				int             valid_until = 0;
 				int             valid_max = 0;
 				bool            has_valid_until = false; 
+#if PG_VERSION_NUM >= 120000
 				bool            save_password = false;
 				char           *password;
+#endif
 				DefElem    *dpassword = NULL;
 				DefElem    *dvalidUntil = NULL;
 
@@ -1724,7 +1780,11 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 					j2date(julian, &tm->tm_year, &tm->tm_mon, &tm->tm_mday);
 					validuntil = malloc(sizeof(char)*11);
 					sprintf(validuntil, "%d-%d-%d", tm->tm_year, tm->tm_mon, tm->tm_mday);
+#if PG_VERSION_NUM >= 100000
 					dvalidUntil = makeDefElem("validUntil", (Node *) makeString(validuntil), 1);
+#else
+					dvalidUntil = makeDefElem("validUntil", (Node *) makeString(validuntil));
+#endif
 					((CreateRoleStmt *)parsetree)->options = lappend(((CreateRoleStmt *)parsetree)->options, dvalidUntil);
 				}
 
@@ -1811,7 +1871,6 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	{
 		if (load_roleid[0] != '\0')
 			roleid = get_role_oid(load_roleid, true);
-
 		/* set force change password option if password_change_first_login is set */
 		if (password_change_first_login && roleid != InvalidOid)
 			set_force_change_password(InvalidOid, roleid, "true");
@@ -1967,7 +2026,11 @@ pgph_shmem_startup(void)
 	if (!found)
 	{
 		/* First time through ... */
+#if PG_VERSION_NUM >= 90600
 		pgph->lock = &(GetNamedLWLockTranche(PGPH_TRANCHE_NAME))->lock;
+#else
+		pgph->lock = LWLockAssign();
+#endif
 	}
 
 	memset(&info, 0, sizeof(info));
@@ -1976,7 +2039,12 @@ pgph_shmem_startup(void)
 	pgph_hash = ShmemInitHash("pg_password_history hash",
 							  pgph_max, pgph_max,
 							  &info,
-							  HASH_ELEM | HASH_BLOBS);
+#if PG_VERSION_NUM >= 90500
+							  HASH_ELEM | HASH_BLOBS
+#else
+							  HASH_ELEM | HASH_FUNCTION
+#endif
+							 );
 
 	LWLockRelease(AddinShmemInitLock);
 
@@ -2219,7 +2287,11 @@ pgaf_shmem_startup(void)
 	if (!found)
 	{
 		/* First time through ... */
+#if PG_VERSION_NUM >= 90600
 		pgaf->lock = &(GetNamedLWLockTranche(PGAF_TRANCHE_NAME))->lock;
+#else
+		pgph->lock = LWLockAssign();
+#endif
 	}
 
 	memset(&info, 0, sizeof(info));
@@ -2228,7 +2300,12 @@ pgaf_shmem_startup(void)
 	pgaf_hash = ShmemInitHash("pg_auth_failure_history hash",
 							  pgaf_max, pgaf_max,
 							  &info,
-							  HASH_ELEM | HASH_BLOBS);
+#if PG_VERSION_NUM >= 90500
+							  HASH_ELEM | HASH_BLOBS
+#else
+							  HASH_ELEM | HASH_FUNCTION
+#endif
+							 );
 
 	LWLockRelease(AddinShmemInitLock);
 }
