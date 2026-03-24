@@ -1433,15 +1433,12 @@ _PG_init(void)
          * resources in pgph_shmem_startup().
          */
         RequestAddinShmemSpace(pgph_memsize());
-#if PG_VERSION_NUM >= 90600
-        RequestNamedLWLockTranche(PGPH_TRANCHE_NAME, 1);
-#else
-        RequestAddinLWLocks(1);
-#endif
         RequestAddinShmemSpace(pgaf_memsize());
 #if PG_VERSION_NUM >= 90600
+        RequestNamedLWLockTranche(PGPH_TRANCHE_NAME, 1);
         RequestNamedLWLockTranche(PGAF_TRANCHE_NAME, 1);
 #else
+        RequestAddinLWLocks(1);
         RequestAddinLWLocks(1);
 #endif
 #else
