@@ -1438,8 +1438,7 @@ _PG_init(void)
         RequestNamedLWLockTranche(PGPH_TRANCHE_NAME, 1);
         RequestNamedLWLockTranche(PGAF_TRANCHE_NAME, 1);
 #else
-        RequestAddinLWLocks(1);
-        RequestAddinLWLocks(1);
+        RequestAddinLWLocks(2);
 #endif
 #else
 	MarkGUCPrefixReserved("credcheck");
