@@ -30,7 +30,6 @@
 #if PG_VERSION_NUM >= 90500
 #include "access/parallel.h"
 #endif
-#include "access/xact.h"
 
 #include "catalog/catalog.h"
 #include "catalog/indexing.h"
