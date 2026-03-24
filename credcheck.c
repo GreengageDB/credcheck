@@ -2030,6 +2030,9 @@ pgph_shmem_startup(void)
 	}
 
 	memset(&info, 0, sizeof(info));
+#if PG_VERSION_NUM < 90500
+	info.hash = tag_hash;
+#endif
 	info.keysize = sizeof(pgphHashKey);
 	info.entrysize = sizeof(pgphEntry);
 	pgph_hash = ShmemInitHash("pg_password_history hash",
@@ -2291,6 +2294,9 @@ pgaf_shmem_startup(void)
 	}
 
 	memset(&info, 0, sizeof(info));
+#if PG_VERSION_NUM < 90500
+	info.hash = tag_hash;
+#endif
 	info.keysize = sizeof(pgafHashKey);
 	info.entrysize = sizeof(pgafEntry);
 	pgaf_hash = ShmemInitHash("pg_auth_failure_history hash",
