@@ -1870,6 +1870,7 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	{
 		if (load_roleid[0] != '\0')
 			roleid = get_role_oid(load_roleid, true);
+
 		/* set force change password option if password_change_first_login is set */
 		if (password_change_first_login && roleid != InvalidOid)
 			set_force_change_password(InvalidOid, roleid, "true");
