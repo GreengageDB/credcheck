@@ -19,6 +19,7 @@ REGRESS_OPTS  = --inputdir=test --load-extension=credcheck
 TESTS = setup 01_username 02_password 03_rename 04_alter_pwd \
 	05_reuse_history 06_reuse_interval 07_valid_until \
 	08_first_login teardown
+
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 
 PG_CONFIG = pg_config
