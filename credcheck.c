@@ -222,9 +222,7 @@ static void pghist_shmem_request(void);
 static void pghist_shmem_startup(void);
 static void pgph_shmem_startup(void);
 static void pgaf_shmem_startup(void);
-#if PG_VERSION_NUM >= 120000
 static int  entry_cmp(const void *lhs, const void *rhs);
-#endif
 static Size pgph_memsize(void);
 static void pg_password_history_internal(FunctionCallInfo fcinfo);
 static void fix_log(ErrorData *edata);
@@ -270,7 +268,6 @@ static bool force_change_password = false;
 static bool disallow_change_password = false;
 static bool superuser_nocheck = false;
 
-#if PG_VERSION_NUM >= 120000
 /*
  password_reuse_history:
 	number of distinct passwords set before a password can be reused.
@@ -281,7 +278,6 @@ static int password_reuse_history = 0;
 static int password_reuse_interval = 0;
 
 char *str_to_sha256(const char *str, const char *salt);
-#endif
 
 bool check_whitelist(char **newval, void **extra, GucSource source);
 bool is_in_whitelist(char *username, char *whitelist);
@@ -857,7 +853,6 @@ password_guc()
 				gettext_noop("password should contain these characters"), NULL,
 				&password_contain, "", PGC_SUSET, 0, NULL, NULL, NULL);
 
-#if PG_VERSION_NUM >= 120000
 	DefineCustomIntVariable("credcheck.password_reuse_history",
 				gettext_noop("minimum number of password changes before permitting reuse"),
 				NULL, &password_reuse_history, 0, 0, 100,
@@ -867,7 +862,6 @@ password_guc()
 				gettext_noop("minimum number of days elapsed before permitting reuse"),
 				NULL, &password_reuse_interval, 0, 0, 730, /* max 2 years */
 				PGC_SUSET, 0, NULL, NULL, NULL);
-#endif
 
 	DefineCustomIntVariable("credcheck.password_valid_until",
 				gettext_noop("force use of VALID UNTIL clause in CREATE ROLE statement"
@@ -910,7 +904,6 @@ password_guc()
 
 }
 
-#if PG_VERSION_NUM >= 120000
 static void
 save_password_in_history(const char *username, const char *password)
 {
@@ -1017,7 +1010,6 @@ rename_user_in_history(const char *username, const char *newname)
 /*
  * qsort comparator for sorting into increasing usage order
  */
-#if PG_VERSION_NUM >= 120000
 static int
 entry_cmp(const void *lhs, const void *rhs)
 {
@@ -1031,7 +1023,6 @@ entry_cmp(const void *lhs, const void *rhs)
         else
                 return 0;
 }
-#endif
 
 static void
 remove_password_from_history(const char *username, const char *password, int numentries)
@@ -1281,7 +1272,6 @@ check_password_reuse(const char *username, const char *password)
 	/* The password was not found, add the password to the history */
 	return true;
 }
-#endif
 
 /* Return the number of days between current timestamp and the date given as parameter */
 static int
@@ -1541,10 +1531,8 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 					/* check the validity of the username */
 					username_check(stmt->newname, NULL);
 
-#if PG_VERSION_NUM >= 120000
 					/* rename the user in the history table */
 					rename_user_in_history(stmt->subname, stmt->newname);
-#endif
 				}
 				break;
 			}
@@ -1553,10 +1541,8 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 			{
 				AlterRoleStmt *stmt = (AlterRoleStmt *)parsetree;
 				ListCell      *option;
-#if PG_VERSION_NUM >= 120000
 				char          *password;
 				bool           save_password = false;
-#endif
 				DefElem    *dvalidUntil = NULL;
 				DefElem    *dpassword = NULL;
 
@@ -1605,15 +1591,17 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 							(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
 								errmsg(gettext_noop("you must change your password first."))));
 
-#if PG_VERSION_NUM >= 120000
 				/* check the password set */
 				if (dpassword && dpassword->arg)
 				{
 					statement_has_password = true;
 					password = strVal(dpassword->arg);
+#if PG_VERSION_NUM >= 90500
 					save_password = check_password_reuse(stmt->role->rolename, password);
-				}
+#else
+					save_password = check_password_reuse(stmt->role, password);
 #endif
+				}
 				/*
 				 * when the user change his password, automatically set the valid until
 				 * date to now() + password_valid_until days if password_valid_until is set.
@@ -1684,10 +1672,12 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 								errmsg(gettext_noop("the VALID UNTIL option must NOT have a date beyond %d days"), password_valid_max)));
 				}
 
-#if PG_VERSION_NUM >= 120000
 				/* The password can be saved into the history */
 				if (save_password)
+#if PG_VERSION_NUM >= 90500
 					save_password_in_history(stmt->role->rolename, password);
+#else
+					save_password_in_history(stmt->role, password);
 #endif
 				if (force_change_password)
 				{
@@ -1710,10 +1700,8 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 				int             valid_until = 0;
 				int             valid_max = 0;
 				bool            has_valid_until = false; 
-#if PG_VERSION_NUM >= 120000
 				bool            save_password = false;
 				char           *password;
-#endif
 				DefElem    *dpassword = NULL;
 				DefElem    *dvalidUntil = NULL;
 
@@ -1737,14 +1725,12 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 						dvalidUntil = defel;
 					}
 				}
-#if PG_VERSION_NUM >= 120000
 				if (dpassword && dpassword->arg)
 				{
 					statement_has_password = true;
 					password = strVal(dpassword->arg);
 					save_password = check_password_reuse(stmt->role, password);
 				}
-#endif
 				/*
 				 * At user creation automatically set the valid until date to now() + password_valid_until
 				 * days if password_valid_until is set.
@@ -1812,17 +1798,15 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
 							errmsg(gettext_noop("require a VALID UNTIL option with a date beyond %d days"), password_valid_max)));
 
-#if PG_VERSION_NUM >= 120000
 				/* The password can be saved into the history */
 				if (save_password)
 					save_password_in_history(stmt->role, password);
-#endif
+
 				strcpy(load_roleid, stmt->role);
 
 				break;
 			}
 
-#if PG_VERSION_NUM >= 120000
 			case T_DropRoleStmt:
 			{
 				DropRoleStmt *stmt = (DropRoleStmt *)parsetree;
@@ -1830,13 +1814,19 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 
 				foreach(item, stmt->roles)
 				{
+#if PG_VERSION_NUM >= 90500
 					RoleSpec   *rolspec = lfirst(item);
 
 					remove_user_from_history(rolspec->rolename);
+#else
+					const char *role = strVal(lfirst(item));
+
+					remove_user_from_history(role);
+#endif
 				}
 				break;
 			}
-#endif
+
 			default:
 				break;
 		}
@@ -1875,7 +1865,6 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	elog(DEBUG1, "End cc_ProcessUtility()");
 }
 
-#if PG_VERSION_NUM >= 120000
 #if PG_VERSION_NUM >= 140000
 char *
 str_to_sha256(const char *password, const char *salt)
@@ -1924,7 +1913,6 @@ str_to_sha256(const char *password, const char *salt)
 
 	return result;
 }
-#endif
 #endif
 
 /****
