@@ -16,6 +16,8 @@ on:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   build:
+    # Greengage: disabled, see check.yml
+    if: false
     runs-on: ubuntu-latest
 
     defaults:
