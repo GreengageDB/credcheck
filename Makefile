@@ -25,7 +25,10 @@ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 # Greengage: set up the cluster before the upstream tests, run the
 # Greengage-specific tests after them and restore the cluster at the end
 REGRESS_OPTS += --init-file=test/init_file
-TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only teardown
+TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only gg_03_update \
+	gg_04_multi_statement teardown
+# The version shipped with Greengage 6X, to update from it
+DATA += sql/$(EXTENSION)--4.6.0.sql
 
 PG_CONFIG = pg_config
 

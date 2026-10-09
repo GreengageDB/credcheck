@@ -2322,7 +2322,9 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	if (use_superuser_priv)
 		SetUserIdAndSecContext(save_userid, save_sec_context);
 
-	if (MyProcPort != NULL && context == PROCESS_UTILITY_TOPLEVEL && NOT_IN_PARALLEL_WORKER)
+	if (MyProcPort != NULL && NOT_IN_PARALLEL_WORKER &&
+			(context == PROCESS_UTILITY_TOPLEVEL || context == PROCESS_UTILITY_QUERY)
+	   )
 	{
 		if (load_roleid[0] != '\0')
 			roleid = get_role_oid(load_roleid, true);
