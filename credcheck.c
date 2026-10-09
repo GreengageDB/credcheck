@@ -1738,6 +1738,14 @@ check_password(const char *username, const char *password,
                            PasswordType password_type, Datum validuntil_time,
                            bool validuntil_null)
 {
+	/*
+	 * no check at all if the user is superuser
+	 * and superuser_nocheck is enabled, the hook is called by
+	 * CreateRole()/AlterRole() under cc_ProcessUtility(), so its bypass
+	 * doesn't apply here
+	 */
+	if (superuser() && superuser_nocheck)
+		return;
 
 	switch (password_type)
 	{
@@ -2322,7 +2330,9 @@ cc_ProcessUtility(PEL_PROCESSUTILITY_PROTO)
 	if (use_superuser_priv)
 		SetUserIdAndSecContext(save_userid, save_sec_context);
 
-	if (MyProcPort != NULL && context == PROCESS_UTILITY_TOPLEVEL && NOT_IN_PARALLEL_WORKER)
+	if (MyProcPort != NULL && NOT_IN_PARALLEL_WORKER &&
+			(context == PROCESS_UTILITY_TOPLEVEL || context == PROCESS_UTILITY_QUERY)
+	   )
 	{
 		if (load_roleid[0] != '\0')
 			roleid = get_role_oid(load_roleid, true);

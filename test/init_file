@@ -1,5 +1,7 @@
 -- start_matchignore
 m/^NOTICE:.*resource queue required -- using default resource queue ".*"/
+m/^CONTEXT:  SQL statement "CREATE (ROLE|USER) /
+m/^PL\/pgSQL function inline_code_block line \d+ at SQL statement$/
 m/^HINT:  Process \d+ will wait for gp_debug_linger=\d+ seconds before termination\./
 m/^Note that its locks and other resources will not be released until then\./
 -- end_matchignore
