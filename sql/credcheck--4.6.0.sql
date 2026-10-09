@@ -34,7 +34,7 @@ CREATE FUNCTION pg_password_history (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
 
 -- Register a view on the function for ease of use.
 CREATE VIEW pg_password_history AS
@@ -85,11 +85,19 @@ CREATE FUNCTION pg_banned_role (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
 
 -- Register a view on the function for ease of use.
-CREATE VIEW pg_banned_role AS
-  SELECT roleid::regrole, failure_count, banned_date FROM pg_banned_role();
+DO $$ BEGIN
+    IF setting::int >= 90500 FROM pg_settings WHERE name = 'server_version_num' THEN
+        CREATE VIEW pg_banned_role AS
+          SELECT roleid::regrole, failure_count, banned_date FROM pg_banned_role();
+    ELSE
+        CREATE VIEW pg_banned_role AS
+          SELECT rolname, failure_count, banned_date FROM pg_banned_role()
+            JOIN pg_catalog.pg_roles ON oid = roleid;
+    END IF;
+END; $$;
 
 GRANT SELECT ON pg_banned_role TO PUBLIC;
 

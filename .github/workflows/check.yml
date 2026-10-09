@@ -1,0 +1,53 @@
+name: Check
+
+on:
+  pull_request:
+    paths-ignore:
+      - "*.md"
+      - "ChangeLog"
+
+# Concurrency control to cancel previous runs on new push to same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true  # Automatically cancel any previous runs for the same group
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ggdb6_ubuntu24.04, ggdb7_ubuntu]
+    container:
+      image: ghcr.io/greengagedb/greengage/${{ matrix.image }}:latest
+      options:
+        --sysctl "kernel.sem=500 1024000 200 4096"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Build and install
+        shell: bash
+        run: bash $GITHUB_WORKSPACE/ci/install.bash
+        working-directory: /home/gpadmin
+      - name: Tests
+        run: su gpadmin -c 'bash ci/test.bash'
+      - name: Collect logs
+        if: always()
+        shell: bash
+        run: |
+          params=(
+            "./ d gpAdminLogs"
+            "gpdb_src/gpAux/gpdemo/datadirs/ d log"
+            "gpdb_src/gpAux/gpdemo/datadirs/ d pg_log"
+          )
+          for param in "${params[@]}"; do
+            read -r path type name <<< "$param"
+            find $path -name $name -type $type -exec tar -rf "/logs/$name.tar" {} \;
+          done
+        working-directory: /home/gpadmin
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: credcheck_${{ matrix.image }}_logs
+          path: /logs/*

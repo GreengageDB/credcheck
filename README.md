@@ -12,6 +12,7 @@
 	- [Warning before password expire](#warning-before-password-expire)
 	- [Examples](#examples)
 	- [Limitations](#limitations)
+	- [Greengage](#greengage)
 	- [Authors](#authors)
 	- [License](#license)
 	- [Credits](#credits)
@@ -34,9 +35,8 @@ This extension provides all the checks as configurable parameters. The default c
 
 ### [Installation](#installation)
 
-To install the credcheck extension you need a PostgreSQL version upper than 10
-but if you want to use the Password Reuse Policy feature the minimum version
-required is 12.
+To install the credcheck extension and to use the Password Reuse Policy feature
+you need a PostgreSQL version 9.4 or higher.
 
 This extension must be compiled with pgxs, so the `pg_config` tool must be
 available from your PATH environment variable.
@@ -561,6 +561,38 @@ postgres=# CREATE USER user1 PASSWORD 'this is some plain text';
 CREATE ROLE
 postgres=# ALTER USER user1 RENAME to test_user;
 ```
+
+### [Greengage](#greengage)
+
+The extension can be built for Greengage 6 and Greengage 7. Add `credcheck` to
+`shared_preload_libraries` on all instances of the cluster, keeping the
+libraries already listed there, and restart the cluster:
+
+	gpconfig -c shared_preload_libraries -v '<current libraries>,credcheck'
+	gpstop -ar
+
+The checks, the password reuse policy, the authentication failure ban and the
+forced password change work on the coordinator only. The functions returning
+the password history and the banned roles are executed on the coordinator, so
+`pg_password_history` and `pg_banned_role` can be joined with distributed
+tables. The functions changing the password history or the banned roles can't
+be executed on segments, for example when they are called for each row of a
+distributed table. The `credcheck_internal.force_change_password` setting of a
+role is changed on the coordinator and on segments, as `ALTER ROLE ... SET`
+does.
+
+The password history is not replicated to the standby coordinator.
+`gpinitstandby` copies the `pg_password_history` file of the coordinator data
+directory, so after `gpactivatestandby` the password history is the one the
+coordinator had when the standby was initialized. The banned roles are kept in
+shared memory only, so they are lost on restart and after `gpactivatestandby`.
+`gpexpand` copies the password history file to the new segments, it is removed
+there when the segment is started with credcheck in `shared_preload_libraries`.
+
+Greengage 6 and 7 are based on PostgreSQL older than 14, where the password
+history holds HMAC-SHA256 hashes of the passwords salted with the role name, as
+upstream does on PostgreSQL 14 and later. A password history file with unsalted
+hashes, written by previous versions, is ignored and removed at startup.
 
 ### [Authors](#authors)
 

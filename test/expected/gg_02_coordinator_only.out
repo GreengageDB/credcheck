@@ -1,0 +1,47 @@
+-- In Greengage, the password history and the banned roles are kept in the
+-- shared memory of the coordinator only.
+SET credcheck.password_reuse_history = 2;
+CREATE USER cc_coord1 WITH PASSWORD 'H8Hdre=S2';
+CREATE USER cc_coord2 WITH PASSWORD 'J8YuRe=6O';
+CREATE TABLE cc_roles (u name) DISTRIBUTED BY (u);
+INSERT INTO cc_roles VALUES ('cc_coord1'), ('cc_coord2'), ('cc_coord3');
+-- The history is read on the coordinator, even when joined with a
+-- distributed table
+SELECT r.u, count(h.rolename) FROM cc_roles r
+  LEFT JOIN pg_password_history h ON h.rolename = r.u
+  GROUP BY r.u ORDER BY r.u;
+     u     | count 
+-----------+-------
+ cc_coord1 |     1
+ cc_coord2 |     1
+ cc_coord3 |     0
+(3 rows)
+
+-- The history and the banned roles can't be changed on segments
+SELECT pg_password_history_reset(u) FROM cc_roles;
+ERROR:  pg_password_history_reset() can only be executed on the coordinator
+SELECT pg_password_history_timestamp(u, now()) FROM cc_roles;
+ERROR:  pg_password_history_timestamp() can only be executed on the coordinator
+SELECT pg_banned_role_reset(u) FROM cc_roles;
+ERROR:  pg_banned_role_reset() can only be executed on the coordinator
+-- They can be executed on the coordinator
+SELECT pg_password_history_reset('cc_coord1');
+ pg_password_history_reset 
+---------------------------
+                         1
+(1 row)
+
+SELECT r.u, count(h.rolename) FROM cc_roles r
+  LEFT JOIN pg_password_history h ON h.rolename = r.u
+  GROUP BY r.u ORDER BY r.u;
+     u     | count 
+-----------+-------
+ cc_coord1 |     0
+ cc_coord2 |     1
+ cc_coord3 |     0
+(3 rows)
+
+DROP TABLE cc_roles;
+DROP USER cc_coord1;
+DROP USER cc_coord2;
+RESET credcheck.password_reuse_history;
