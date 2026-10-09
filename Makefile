@@ -18,15 +18,24 @@ DATA = $(wildcard updates/*--*.sql) sql/$(EXTENSION)--$(EXTVERSION).sql
 REGRESS_OPTS  = --inputdir=test --load-extension=credcheck
 TESTS = 01_username 02_password 03_rename 04_alter_pwd \
 	05_reuse_history 06_reuse_interval 07_valid_until \
-	08_first_login
+	08_first_login 09_plpgsql
 
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 
 # Greengage: set up the cluster before the upstream tests, run the
 # Greengage-specific tests after them and restore the cluster at the end
 REGRESS_OPTS += --init-file=test/init_file
-TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only teardown
+TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only gg_03_update \
+	gg_04_multi_statement teardown
+# The version shipped with Greengage 6X, to update from it
+DATA += sql/$(EXTENSION)--4.6.0.sql
 
 PG_CONFIG = pg_config
+
+# Extract the major version number
+PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed -e 's/^[a-zA-Z ]*//' -e 's/\..*//')
+
+TAP_TESTS = 1
+
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
