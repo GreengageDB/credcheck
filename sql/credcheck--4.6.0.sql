@@ -34,7 +34,7 @@ CREATE FUNCTION pg_password_history (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
+LANGUAGE C STRICT VOLATILE;
 
 -- Register a view on the function for ease of use.
 CREATE VIEW pg_password_history AS
@@ -85,7 +85,7 @@ CREATE FUNCTION pg_banned_role (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
+LANGUAGE C STRICT VOLATILE;
 
 -- Register a view on the function for ease of use.
 DO $$ BEGIN

@@ -572,12 +572,9 @@ libraries already listed there, and restart the cluster:
 	gpstop -ar
 
 The checks, the password reuse policy, the authentication failure ban and the
-forced password change work on the coordinator only. The functions returning
-the password history and the banned roles are executed on the coordinator, so
-`pg_password_history` and `pg_banned_role` can be joined with distributed
-tables. The functions changing the password history or the banned roles can't
-be executed on segments, for example when they are called for each row of a
-distributed table. The `credcheck_internal.force_change_password` setting of a
+forced password change work on the coordinator only. The functions changing
+the password history or the banned roles can't be executed on segments, for
+example when they are called for each row of a distributed table. The `credcheck_internal.force_change_password` setting of a
 role is changed on the coordinator and on segments, as `ALTER ROLE ... SET`
 does.
 
