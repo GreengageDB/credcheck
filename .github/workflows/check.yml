@@ -24,7 +24,7 @@ jobs:
         --sysctl "kernel.sem=500 1024000 200 4096"
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Build and install
         shell: bash
         run: bash $GITHUB_WORKSPACE/ci/install.bash
