@@ -22,6 +22,11 @@ TESTS = 01_username 02_password 03_rename 04_alter_pwd \
 
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 
+# Greengage: set up the cluster before the upstream tests, run the
+# Greengage-specific tests after them and restore the cluster at the end
+REGRESS_OPTS += --init-file=test/init_file
+TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only teardown
+
 PG_CONFIG = pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
