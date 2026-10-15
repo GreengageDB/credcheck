@@ -91,6 +91,11 @@ BEGIN
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END;
 	BEGIN
+		-- BYPASSRLS appeared in Postgres 9.5
+		EXECUTE 'ALTER ROLE low_priv BYPASSRLS';
+	EXCEPTION WHEN OTHERS THEN NULL;
+	END;
+	BEGIN
 		ALTER ROLE low_priv ENCRYPTED PASSWORD 'SomePass2' SUPERUSER;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END;
@@ -103,7 +108,8 @@ BEGIN
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END;
 	SELECT rolsuper OR rolcreaterole OR rolcreatedb
-		INTO escalated FROM pg_roles WHERE rolname = current_role;
+		OR coalesce((row_to_json(r)->>'rolbypassrls')::boolean, false)
+		INTO escalated FROM pg_roles r WHERE rolname = current_role;
 	IF escalated THEN
 		RAISE NOTICE 'FAIL: low_priv gained privileges';
 	ELSE

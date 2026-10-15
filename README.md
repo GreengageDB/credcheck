@@ -152,7 +152,8 @@ contrib_regression=# select * from pg_lastlog;
 
 It is also possible to store the last query executed by the user by enabling
 `credcheck.lastlog_track_query`. The query is truncated by default at 1024 bytes
-but this size can be increased using `credcheck.lastlog_query_size`.
+but this size can be increased using `credcheck.lastlog_query_size`. When it is
+set to 0, no query is stored, whatever `credcheck.lastlog_track_query` is.
 
 ### [Using max_auth_failure with PgBouncer](#using-max-auth-failure-with-pgpouncer)
 
@@ -454,7 +455,8 @@ restrict new passwords from being chosen from this history:
 To be able to list the content of the history a view is provided in the database you have created
 the credcheck extension. The view is named `public.pg_password_history`. Only a superuser can see the content
 of this view or call the underlying `public.pg_password_history()` function, since the stored hashes, which
-include the current passwords, could be used to recover the passwords offline.
+include the current passwords, could be used to recover the passwords offline. On Greengage 7X, members of
+the `pg_read_all_stats` role can see the content of the view too.
 
 A superuser can also reset the content of the password history by calling a function named `public.pg_password_history_reset()`. If it is called without an argument, all the passwords history will be cleared. To only remove the records registered for a single user, just pass his name as parameter. This function returns the number of records removed from the history.
 
@@ -734,20 +736,33 @@ libraries already listed there, and restart the cluster:
 	gpconfig -c shared_preload_libraries -v '<current libraries>,credcheck'
 	gpstop -ar
 
-The checks, the password reuse policy, the authentication failure ban and the
-forced password change work on the coordinator only. The functions changing
-the password history or the banned roles can't be executed on segments, for
-example when they are called for each row of a distributed table. The `credcheck_internal.force_change_password` setting of a
+The checks, the password reuse policy, the authentication failure ban, the
+forced password change and the last-login history work on the coordinator
+only. The functions changing the password history or the banned roles, and
+`credcheck_is_banned()`, can't be executed on segments, for example when they
+are called for each row of a distributed table. The background worker of the
+last-login history is started on the coordinator only, whatever
+`credcheck.lastlog` is on segments. The `credcheck_internal.force_change_password` setting of a
 role is changed on the coordinator and on segments, as `ALTER ROLE ... SET`
 does.
+
+Segments log the statements dispatched by the coordinator, so add `credcheck`
+to `shared_preload_libraries` on segments too, otherwise the passwords aren't
+masked in their logs. The last-login history masks the passwords whatever
+`credcheck.no_password_logging` is. The arguments of `pg_check_password()`
+aren't masked.
+Only the messages written to the log are masked, the text of the statement
+itself is not, so the passwords are still shown in clear text in
+`pg_stat_activity` and in the query history of gpperfmon.
 
 The password history is not replicated to the standby coordinator.
 `gpinitstandby` copies the `pg_password_history` file of the coordinator data
 directory, so after `gpactivatestandby` the password history is the one the
 coordinator had when the standby was initialized. The banned roles are kept in
 shared memory only, so they are lost on restart and after `gpactivatestandby`.
-`gpexpand` copies the password history file to the new segments, it is removed
-there when the segment is started with credcheck in `shared_preload_libraries`.
+`gpexpand` copies the files of the password history and of the last-login
+history to the new segments, they are removed there when the segment is
+started with credcheck in `shared_preload_libraries`.
 
 Greengage 6 and 7 are based on PostgreSQL older than 14, where the password
 history holds HMAC-SHA256 hashes of the passwords salted with the role name, as

@@ -34,14 +34,22 @@ CREATE FUNCTION pg_password_history (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
 
 -- Register a view on the function for ease of use.
 CREATE VIEW pg_password_history AS
   SELECT * FROM pg_password_history();
 REVOKE ALL ON FUNCTION pg_password_history() FROM PUBLIC;
 REVOKE ALL ON pg_password_history FROM PUBLIC;
-GRANT SELECT ON pg_password_history TO pg_read_all_stats;
+-- Greengage: pg_read_all_stats appeared in Postgres 10, only superusers can
+-- see the password history before. The function is called with the
+-- privileges of the user of the view, so grant it too.
+DO $$ BEGIN
+    IF setting::int >= 100000 FROM pg_settings WHERE name = 'server_version_num' THEN
+        GRANT EXECUTE ON FUNCTION pg_password_history() TO pg_read_all_stats;
+        GRANT SELECT ON pg_password_history TO pg_read_all_stats;
+    END IF;
+END; $$;
 
 ----
 -- Change password creation timestamp for all entries of the specified
@@ -86,11 +94,19 @@ CREATE FUNCTION pg_banned_role (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C STRICT VOLATILE;
+LANGUAGE C STRICT VOLATILE EXECUTE ON MASTER;
 
 -- Register a view on the function for ease of use.
-CREATE VIEW pg_banned_role AS
-  SELECT roleid::regrole, failure_count, banned_date FROM pg_banned_role();
+DO $$ BEGIN
+    IF setting::int >= 90500 FROM pg_settings WHERE name = 'server_version_num' THEN
+        CREATE VIEW pg_banned_role AS
+          SELECT roleid::regrole, failure_count, banned_date FROM pg_banned_role();
+    ELSE
+        CREATE VIEW pg_banned_role AS
+          SELECT rolname, failure_count, banned_date FROM pg_banned_role()
+            JOIN pg_catalog.pg_roles ON oid = roleid;
+    END IF;
+END; $$;
 
 GRANT SELECT ON pg_banned_role TO PUBLIC;
 
@@ -157,11 +173,18 @@ CREATE FUNCTION credcheck_lastlog (
 )
 RETURNS SETOF record
 AS 'MODULE_PATHNAME', 'credcheck_lastlog'
-LANGUAGE C VOLATILE;
+LANGUAGE C VOLATILE EXECUTE ON MASTER;
 
 CREATE VIEW pg_lastlog AS
   SELECT * FROM credcheck_lastlog();
 
 REVOKE ALL ON FUNCTION credcheck_lastlog() FROM PUBLIC;
 REVOKE ALL ON pg_lastlog FROM PUBLIC;
-GRANT SELECT ON pg_lastlog TO pg_read_all_stats;
+-- Greengage: pg_read_all_stats appeared in Postgres 10. The function is
+-- called with the privileges of the user of the view, so grant it too.
+DO $$ BEGIN
+    IF setting::int >= 100000 FROM pg_settings WHERE name = 'server_version_num' THEN
+        GRANT EXECUTE ON FUNCTION credcheck_lastlog() TO pg_read_all_stats;
+        GRANT SELECT ON pg_lastlog TO pg_read_all_stats;
+    END IF;
+END; $$;

@@ -24,6 +24,9 @@ DROP USER aaa;
 -- production (the flag comes from pg_db_role_setting, not from a manual SET).
 SET credcheck.password_change_first_login = true;
 CREATE USER forced_login PASSWORD 'DummY1passWORD!';
+-- Greengage: let forced_login connect through the Unix socket, and remember
+-- the superuser, which is not postgres, to reconnect as it
+SELECT current_user AS superuser \gset
 \c - forced_login
 -- Session/transaction-control statements that drivers and connection poolers
 -- must be able to issue while establishing a session (pgbouncer varcache_apply,
@@ -34,6 +37,7 @@ SET application_name = 'x';
 BEGIN;
 COMMIT;
 DISCARD ALL;
+NOTICE:  command without clusterwide effect
 -- The flag stays armed after DISCARD ALL (its default comes from the role
 -- settings), so real data access is still blocked -- and, unlike the swallowed
 -- pooler-setup error, this one reaches the client.
@@ -54,5 +58,5 @@ SELECT 1 AS after_password_change;
 (1 row)
 
 -- Reconnect as the superuser to clean up.
-\c - postgres
+\c - :superuser
 DROP USER forced_login;

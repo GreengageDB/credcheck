@@ -28,7 +28,8 @@ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 REGRESS_OPTS += --init-file=test/init_file
 TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only gg_03_update \
 	gg_04_multi_statement gg_05_superuser_nocheck \
-	gg_06_password_history_access teardown
+	gg_06_password_history_access gg_07_lastlog_access \
+	gg_08_password_logging_segments gg_09_lastlog teardown
 # The version shipped with Greengage 6X, to update from it
 DATA += sql/$(EXTENSION)--4.6.0.sql
 
