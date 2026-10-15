@@ -63,6 +63,13 @@
 #include "nodes/pg_list.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/bgworker.h"
+#if PG_VERSION_NUM < 150000
+/* autovacuum_max_workers and max_wal_senders, to compute MaxBackends */
+#include "postmaster/autovacuum.h"
+#if PG_VERSION_NUM >= 120000
+#include "replication/walsender.h"
+#endif
+#endif
 #include "storage/latch.h"
 #include "storage/proc.h"
 #include "storage/procarray.h"
@@ -77,6 +84,10 @@
 #endif
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
+#if PG_VERSION_NUM < 90500
+/* pg_write_barrier(), included by storage/lwlock.h in later versions */
+#include "port/atomics.h"
+#endif
 #include "storage/shmem.h"
 #if PG_VERSION_NUM >= 140000
 #include "utils/wait_event.h"
@@ -136,6 +147,13 @@ check_coordinator(const char *funcname)
 #define NOT_IN_PARALLEL_WORKER (ParallelWorkerNumber < 0)
 #else
 #define NOT_IN_PARALLEL_WORKER (true)
+#define MyLatch (&MyProc->procLatch)
+#endif
+
+/* BasicOpenFile() takes the file mode before Postgres 11 */
+#if PG_VERSION_NUM < 110000
+#define BasicOpenFile(fileName, fileFlags) \
+	BasicOpenFile(fileName, fileFlags, S_IRUSR | S_IWUSR)
 #endif
 
 /* Default passord encryption */
@@ -531,6 +549,8 @@ static int  entry_cmp(const void *lhs, const void *rhs);
 static Size pgph_memsize(void);
 static void pg_password_history_internal(FunctionCallInfo fcinfo);
 static void fix_log(ErrorData *edata);
+static bool query_has_password(const char *s);
+static void mask_passwords(char *s);
 static Size pgaf_memsize(void);
 static void credcheck_max_auth_failure(Port *port, int status);
 static float get_auth_failure(const char *username, Oid userid, int status);
@@ -2028,14 +2048,29 @@ static Size
 lastlog_memsize(void)
 {
 	Size	size;
+	int		nbackends = MaxBackends;
 
 	if (!lastlog_enabled)
 		return 0;
 
+#if PG_VERSION_NUM < 150000
+	/*
+	 * _PG_init() requests the shared memory before the postmaster computes
+	 * MaxBackends, so compute it as InitializeMaxBackends() does
+	 */
+	if (nbackends == 0)
+		nbackends = MaxConnections + autovacuum_max_workers + 1 +
+			max_worker_processes
+#if PG_VERSION_NUM >= 120000
+			+ max_wal_senders
+#endif
+			;
+#endif
+
 	size = offsetof(LastlogShared, active);
-	size = add_size(size, mul_size(MaxBackends, sizeof(LastlogActive)));
+	size = add_size(size, mul_size(nbackends, sizeof(LastlogActive)));
 	/* one query buffer per backend */
-	size = add_size(size, mul_size(MaxBackends, (Size) lastlog_query_size));
+	size = add_size(size, mul_size(nbackends, (Size) lastlog_query_size));
 	return MAXALIGN(size);
 }
 
@@ -2260,7 +2295,17 @@ lastlog_track_last_query(const char *query_string)
 
 	LWLockAcquire(lastlog->lock, LW_EXCLUSIVE);
 	if (a->in_use)
+	{
 		strlcpy(a->last_query, query_string, lastlog_query_size);
+
+		/*
+		 * Members of pg_read_all_stats can see the history, which is kept on
+		 * disk, so mask the passwords whatever credcheck.no_password_logging
+		 * is
+		 */
+		if (query_has_password(a->last_query))
+			mask_passwords(a->last_query);
+	}
 	LWLockRelease(lastlog->lock);
 }
 
@@ -2301,19 +2346,27 @@ lastlog_shmem_startup(void)
 
 	if (!found)
 	{
+#if PG_VERSION_NUM >= 90600
 		lastlog->lock = &(GetNamedLWLockTranche(LASTLOG_TRANCHE_NAME))->lock;
+#else
+		lastlog->lock = LWLockAssign();
+#endif
 		lastlog->nactive_slots = MaxBackends;
 		MemSet(lastlog->active, 0,
 			   mul_size(MaxBackends, sizeof(LastlogActive)));
 	}
 
-	/* wire each backend's query buffer into the area following active[] */
+	/*
+	 * wire each backend's query buffer into the area following active[].
+	 * Without query buffers, credcheck.lastlog_query_size = 0, they would all
+	 * point past the end of the area, so leave them NULL.
+	 */
 	qoff = offsetof(LastlogShared, active)
 		+ mul_size(MaxBackends, sizeof(LastlogActive));
 	query_area = ((char *) lastlog) + qoff;
 	for (i = 0; i < MaxBackends; i++)
-		lastlog->active[i].last_query =
-			query_area + (Size) i * lastlog_query_size;
+		lastlog->active[i].last_query = (lastlog_query_size > 0) ?
+			query_area + (Size) i * lastlog_query_size : NULL;
 
 	/* attach the memory-mapped history file (process-local) */
 	lastlog_mmap_attach();
@@ -2387,9 +2440,21 @@ lastlog_bgworker_main(Datum main_arg)
 		else
 			timeout_ms = 60000L;	/* idle wakeup; shutdown flush only */
 
+#if PG_VERSION_NUM >= 120000
 		rc = WaitLatch(MyLatch,
 					   WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 					   timeout_ms, PG_WAIT_EXTENSION);
+#else
+		rc = WaitLatch(MyLatch,
+					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
+					   timeout_ms
+#if PG_VERSION_NUM >= 100000
+					   , PG_WAIT_EXTENSION
+#endif
+					   );
+		if (rc & WL_POSTMASTER_DEATH)
+			proc_exit(1);
+#endif
 		ResetLatch(MyLatch);
 
 		if (rc & WL_LATCH_SET)
@@ -2554,7 +2619,7 @@ credcheck_lastlog(PG_FUNCTION_ARGS)
 					e->type == LL_USER ? "disconnected" : tname);
 
 				if (e->type == LL_USER && lastlog_track_query
-					&& e->last_query[0] != '\0')
+					&& lastlog_query_size > 0 && e->last_query[0] != '\0')
 					values[9] = CStringGetTextDatum(e->last_query);
 				else
 					nulls[9] = true;
@@ -2617,7 +2682,12 @@ _PG_init(void)
 					GUC_UNIT_S, NULL, NULL, NULL);
 
 		/* Register the lastlog flush/shutdown background worker. */
-		if (lastlog_enabled)
+		if (lastlog_enabled
+#ifdef GP_VERSION_NUM
+			/* The last-login history is kept on the coordinator only */
+			&& IS_QUERY_DISPATCHER()
+#endif
+			)
 		{
 			BackgroundWorker	worker;
 
@@ -2628,7 +2698,9 @@ _PG_init(void)
 			snprintf(worker.bgw_library_name, BGW_MAXLEN, "credcheck");
 			snprintf(worker.bgw_function_name, BGW_MAXLEN, "lastlog_bgworker_main");
 			snprintf(worker.bgw_name, BGW_MAXLEN, "credcheck lastlog flusher");
+#if PG_VERSION_NUM >= 110000
 			snprintf(worker.bgw_type, BGW_MAXLEN, "credcheck lastlog");
+#endif
 			worker.bgw_main_arg = (Datum) 0;
 			worker.bgw_notify_pid = 0;
 			RegisterBackgroundWorker(&worker);
@@ -2699,7 +2771,16 @@ _PG_init(void)
 		{
 			unlink(PGPH_DUMP_FILE_OLD);
 			unlink(PGPH_DUMP_FILE);
+			unlink(PGPH_DUMP_FILE ".legacy-migrated");
+			unlink(LASTLOG_DUMP_FILE);
 		}
+
+		/*
+		 * Segments log the statements dispatched by the coordinator, so mask
+		 * the passwords there too
+		 */
+		prev_log_hook = emit_log_hook;
+		emit_log_hook = fix_log;
 		return;
 	}
 #endif
@@ -2723,7 +2804,7 @@ _PG_init(void)
 	if (lastlog_enabled)
 		RequestNamedLWLockTranche(LASTLOG_TRANCHE_NAME, 1);
 #else
-        RequestAddinLWLocks(2);
+	RequestAddinLWLocks(lastlog_enabled ? 3 : 2);
 #endif
 #else
 	MarkGUCPrefixReserved("credcheck");
@@ -3437,7 +3518,12 @@ pgph_tab_init(void)
 static inline uint32
 pgph_bucket_of(pgphHashKey *key)
 {
+#if PG_VERSION_NUM >= 120000
 	uint32	h = hash_bytes((const unsigned char *) key, sizeof(pgphHashKey));
+#else
+	uint32	h = DatumGetUInt32(hash_any((const unsigned char *) key,
+										sizeof(pgphHashKey)));
+#endif
 
 	return h % pgph_hdr->nbuckets;
 }
@@ -3719,7 +3805,11 @@ pgph_shmem_startup(void)
 						   sizeof(pgphSharedState),
 						   &found);
 	if (!found)
+#if PG_VERSION_NUM >= 90600
 		pgph->lock = &(GetNamedLWLockTranche(PGPH_TRANCHE_NAME))->lock;
+#else
+		pgph->lock = LWLockAssign();
+#endif
 
 	/*
 	 * First process only: relocate an old global/ file, then slurp any legacy
@@ -4009,11 +4099,27 @@ pg_password_history_internal(FunctionCallInfo fcinfo)
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("credcheck must be loaded via shared_preload_libraries to use password history")));
 
-	/* Only superusers can see the history */
+	/*
+	 * Only superusers, and members of pg_read_all_stats since Postgres 10,
+	 * can see the history
+	 */
+#if PG_VERSION_NUM >= 100000
+	if (!superuser() && !has_privs_of_role(GetUserId(),
+#if PG_VERSION_NUM >= 140000
+										   ROLE_PG_READ_ALL_STATS
+#else
+										   DEFAULT_ROLE_READ_ALL_STATS
+#endif
+										   ))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("only superuser or a member of pg_read_all_stats can see password history")));
+#else
 	if (!superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("only superuser can see password history")));
+#endif
 
 	/* check to see if caller supports us returning a tuplestore */
 	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
@@ -4262,6 +4368,80 @@ mask_string_literal(char *p, bool estr)
 }
 
 /*
+ * Mask, in place, every string constant in the argument list of a function
+ * call, keeping its length. 'p' points at the opening parenthesis. Returns
+ * the position just past the closing one.
+ */
+static char *
+mask_call_arguments(char *p)
+{
+	int		depth = 0;
+
+	while (*p)
+	{
+		unsigned char c = (unsigned char) *p;
+
+		if (c == '(')
+			depth++;
+		else if (c == ')')
+		{
+			if (--depth == 0)
+				return p + 1;
+		}
+		else if (c == '\'')
+		{
+			p = mask_string_literal(p, false);
+			continue;
+		}
+		else if (c == '"')
+		{
+			/* quoted identifier */
+			p++;
+			while (*p && !(*p == '"' && p[1] != '"'))
+				p += (*p == '"') ? 2 : 1;
+			if (*p)
+				p++;
+			continue;
+		}
+		else if (c == '$')
+		{
+			/* dollar-quoted string: mask its body */
+			char	*tagend = p + 1;
+
+			while (*tagend &&
+				   (*tagend == '_' || isalnum((unsigned char) *tagend)))
+				tagend++;
+
+			if (*tagend == '$')
+			{
+				size_t	  taglen = (size_t) (tagend - p) + 1;
+				char	*body = tagend + 1;
+
+				while (*body && strncmp(body, p, taglen) != 0)
+					*body++ = '.';
+				p = *body ? body + taglen : body;
+				continue;
+			}
+		}
+		else if (c == '_' || isalpha(c))
+		{
+			char	*start = p;
+
+			while (*p == '_' || *p == '$' || isalnum((unsigned char) *p))
+				p++;
+
+			/* E'...' / e'...' escape string constant */
+			if (p - start == 1 && (*start == 'E' || *start == 'e') &&
+				*p == '\'')
+				p = mask_string_literal(p, true);
+			continue;
+		}
+		p++;
+	}
+	return p;
+}
+
+/*
  * Mask, in place, the value of every PASSWORD '<literal>' (and FDW-style
  * "password '<literal>'") clause found in the SQL text 's'. A small lexer is
  * used so that the PASSWORD keyword is only matched as real SQL: string
@@ -4409,6 +4589,21 @@ mask_passwords(char *s)
 					continue;
 				}
 				/* PASSWORD NULL / PASSWORD $n / etc: nothing to mask */
+			}
+
+			/*
+			 * pg_check_password('user', 'secret')  ->
+			 * pg_check_password('....', '......')
+			 */
+			if (len == 17 && pg_strncasecmp(start, "pg_check_password", 17) == 0)
+			{
+				char	*args = skip_ws(p);
+
+				if (*args == '(')
+				{
+					p = mask_call_arguments(args);
+					continue;
+				}
 			}
 			continue;
 		}
@@ -4655,6 +4850,10 @@ credcheck_record_auth_failure(PG_FUNCTION_ARGS)
 	pgafEntry  *entry;
 	float	fail_cnt = 1;
 
+#ifdef GP_VERSION_NUM
+	check_coordinator("credcheck_record_auth_failure");
+#endif
+
 	if (!superuser())
 		ereport(ERROR, (errmsg("only superuser can record authentication failures")));
 
@@ -4721,6 +4920,10 @@ credcheck_is_banned(PG_FUNCTION_ARGS)
 	pgafHashKey key;
 	pgafEntry  *entry;
 	bool	banned = false;
+
+#ifdef GP_VERSION_NUM
+	check_coordinator("credcheck_is_banned");
+#endif
 
 	username = NameStr(*(PG_GETARG_NAME(0)));
 

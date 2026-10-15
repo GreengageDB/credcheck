@@ -58,7 +58,7 @@ SELECT credcheck_record_auth_failure('ban_test');   -- still 3
 
 -- Visible in the same shared ban view used by the in-backend path.
 SELECT failure_count, banned_date IS NOT NULL AS banned
-  FROM pg_banned_role WHERE roleid='ban_test'::regrole;
+  FROM pg_banned_role() JOIN pg_roles ON oid = roleid WHERE rolname='ban_test';
  failure_count | banned 
 ---------------+--------
              3 | t

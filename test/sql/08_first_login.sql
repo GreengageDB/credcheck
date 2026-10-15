@@ -16,6 +16,13 @@ DROP USER aaa;
 -- production (the flag comes from pg_db_role_setting, not from a manual SET).
 SET credcheck.password_change_first_login = true;
 CREATE USER forced_login PASSWORD 'DummY1passWORD!';
+-- Greengage: let forced_login connect through the Unix socket, and remember
+-- the superuser, which is not postgres, to reconnect as it
+-- start_ignore
+\! sed -i -e '1i local all forced_login trust # credcheck test' -e '/ # credcheck test$/d' "$(psql -At -c 'SHOW hba_file' postgres)"
+\! gpstop -u
+-- end_ignore
+SELECT current_user AS superuser \gset
 \c - forced_login
 
 -- Session/transaction-control statements that drivers and connection poolers
@@ -44,5 +51,9 @@ ALTER USER forced_login PASSWORD 'BrandNew3passWORD!';
 SELECT 1 AS after_password_change;
 
 -- Reconnect as the superuser to clean up.
-\c - postgres
+\c - :superuser
 DROP USER forced_login;
+-- start_ignore
+\! sed -i '/ # credcheck test$/d' "$(psql -At -c 'SHOW hba_file' postgres)"
+\! gpstop -u
+-- end_ignore
