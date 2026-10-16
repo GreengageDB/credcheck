@@ -10,6 +10,8 @@
 	- [Force password change](#force-password-change)
 	- [Prohibit password changes](#disallow-password-change)
 	- [Warning before password expire](#warning-before-password-expire)
+	- [Last login information](#last-login-information)
+    - [Using max_auth_failure with PgBouncer](#using-max-auth-failure-with-pgpouncer)
 	- [Examples](#examples)
 	- [Limitations](#limitations)
 	- [Greengage](#greengage)
@@ -95,6 +97,7 @@ Please find the below list of general checks, which we can enforce on credential
 | password_ignore_case      | password | ignore case while performing above checks           | on            | &check; Abc                 | &#10008; aXf                 |
 | password_valid_until      | password | force use of VALID UNTIL clause in CREATE ROLE statement with a minimum number of days or set it automatically to now() + password_valid_until days in the CREATE/ALTER ROLE statements when the password is changed and no VALID UNTIL clause is present | 60             | &check; CREATE ROLE abcd VALID UNTIL (now()+'3 months'::interval)::date | &#10008; CREATE ROLE abcd LOGIN; |
 | password_valid_until_su   | password | same as above but applies to superuser only | 30             | &check; CREATE ROLE abcd VALID UNTIL (now()+'2 months'::interval)::date | &#10008; CREATE ROLE abcd LOGIN; |
+| password_valid_min        | password | number of days used for the VALID UNTIL clause of newly created roles (CREATE ROLE). When greater than zero it overrides password_valid_until at role creation only, so new roles can be forced to change their password quickly while existing roles that change their password keep the password_valid_until window. When set to 0 (default) CREATE ROLE keeps using password_valid_until | 0 (disabled)   | &check; CREATE ROLE abcd VALID UNTIL (now()+'5 days'::interval)::date | &#10008; CREATE ROLE abcd VALID UNTIL (now()+'2 days'::interval)::date; |
 | password_valid_max        | password | force use of VALID UNTIL clause in CREATE ROLE statement with a maximum number of days   | 365             | &check; CREATE ROLE abcd VALID UNTIL (now()+'6 months'::interval)::date | &#10008;  CREATE ROLE abcd VALID UNTIL (now()+'2 years'::interval)::date; |
 | password_valid_warn       | password | emit a warning N days before the password is about to expire | 0 (disabled) |  |  |
 | password_valid_warning | password | throw a warning N days before the password expires | 0 (disabled) |  |  |
@@ -107,6 +110,139 @@ credcheck.whitelist = 'admin,supuser'
 will disable any credcheck policy for password change of users named `admin` or `supuser`.
 
 To disable password policy checks for changes done by a superuser, enable GUC `credcheck.superuser_nocheck`.
+
+### [Last login information](#last-login-information)
+
+This feature is a last-login history modelled on the Unix last(1)/wtmp.
+Records user sessions (name, login time, duration, backend pid, source
+IP and port, and optionally the last SQL query) plus PostgreSQL
+boot/shutdown/crash markers. To enable this feature set `credcheck.lastlog`
+to `on`.
+
+The history ring lives in a mmap file in the data directory, so writes
+go through the kernel page cache and survive a postmaster crash. A dedicated
+background worker msync()s periodically at `credcheck.lastlog_flush_interval`
+seconds (default 0, at shutdown only) and writes the clean-shutdown marker on
+SIGTERM; an unclean previous shutdown is detected at startup and recorded as
+a crash record. Live sessions are kept in anonymous shared memory and finalized
+into the ring at backend exit.
+
+Number of records kept in the lastlog history ring is 1024, it should be upper
+than max_connections.
+
+New GUCs:
+credcheck.lastlog_query_size, credcheck.lastlog_track_query,
+
+A view `pg_lastlog` over `check_lastlog()` allows to look at the history.
+
+```
+contrib_regression=# select * from pg_lastlog;
+   type   | username |  pid   | client_addr | client_port |          login_time           |          logout_time          |    duration     |      state      | query 
+----------+----------+--------+-------------+-------------+-------------------------------+-------------------------------+-----------------+-----------------+-------
+ user     | gilles   | 148483 | [local]     |           0 | 2026-09-09 16:59:07.765016+02 |                               | 00:00:14.202368 | still connected | 
+ user     | gilles   | 148481 | [local]     |           0 | 2026-09-09 16:59:07.171284+02 | 2026-09-09 16:59:07.174723+02 | 00:00:00.003439 | disconnected    | 
+[...]
+ user     | gilles   | 145047 | [local]     |           0 | 2026-09-09 15:36:34.346523+02 | 2026-09-09 15:36:34.368934+02 | 00:00:00.022411 | disconnected    | 
+ user     | postgres | 144982 | [local]     |           0 | 2026-09-09 15:36:30.786325+02 | 2026-09-09 15:36:30.788083+02 | 00:00:00.001758 | disconnected    | 
+ user     | postgres | 144977 | [local]     |           0 | 2026-09-09 15:36:30.273365+02 | 2026-09-09 15:36:30.275044+02 | 00:00:00.001679 | disconnected    | 
+ user     | postgres | 144974 | [local]     |           0 | 2026-09-09 15:36:29.757562+02 | 2026-09-09 15:36:29.762573+02 | 00:00:00.005011 | disconnected    | 
+ boot     |          | 144960 |             |             | 2026-09-09 15:36:28.674986+02 |                               |                 | boot            | 
+ shutdown |          |        |             |             | 2026-09-09 15:36:28.490285+02 |                               |                 | shutdown        | 
+```
+
+It is also possible to store the last query executed by the user by enabling
+`credcheck.lastlog_track_query`. The query is truncated by default at 1024 bytes
+but this size can be increased using `credcheck.lastlog_query_size`. When it is
+set to 0, no query is stored, whatever `credcheck.lastlog_track_query` is.
+
+### [Using max_auth_failure with PgBouncer](#using-max-auth-failure-with-pgpouncer)
+
+#### Why the counter is bypassed
+
+credcheck counts authentication failures only fires for connections that reach
+PostgreSQL. With `auth_query` (or a userlist), PgBouncer fetches the password
+hash and **verifies the password itself**; a wrong password fails inside
+PgBouncer and no client connection is ever attempted against PostgreSQL. The
+hook never fires, so nothing is counted and no ban is set. This cannot be
+intercepted from inside PostgreSQL — the failure happens in another process.
+
+The patch adds an integration surface so the PgBouncer edge can feed failures
+into credcheck's own ban state (one `credcheck.max_auth_failure` threshold
+governs both direct and pooled connections) and enforce bans through
+`auth_query`.
+
+#### SQL functions
+
+- `credcheck_record_auth_failure(username name) returns int`
+  Report one failure; credcheck applies `credcheck.max_auth_failure` and bans at
+  the threshold. Returns the new count. Superuser-only, REVOKEd from PUBLIC.
+- `credcheck_is_banned(username name) returns bool`
+  True once the role is banned. Read-only; grant to the auth_query role.
+
+Existing `pg_banned_role` (view) and `pg_banned_role_reset(name)` are reused for
+inspection and unban.
+
+##### 1. Enforce bans at the edge (auth_query)
+
+Make the auth_query function refuse a banned role so PgBouncer denies it:
+
+```sql
+-- owned by a role allowed to read pg_authid (SECURITY DEFINER)
+CREATE FUNCTION public.pgbouncer_auth(i_user text)
+RETURNS TABLE(uname text, phash text)
+LANGUAGE sql SECURITY DEFINER AS $$
+  SELECT rolname::text, rolpassword::text
+  FROM pg_authid
+  WHERE rolname = i_user
+    AND rolcanlogin
+    AND NOT credcheck_is_banned(i_user::name)
+$$;
+REVOKE ALL ON FUNCTION public.pgbouncer_auth(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgbouncer_auth(text) TO <pgbouncer_auth_user>;
+GRANT EXECUTE ON FUNCTION credcheck_is_banned(name)   TO <pgbouncer_auth_user>;
+```
+
+pgbouncer.ini:
+```
+auth_query = SELECT uname, phash FROM public.pgbouncer_auth($1)
+```
+
+Note: PgBouncer caches auth_query results, so enforcement takes effect on the
+next cache refresh / reconnect, not instantly.
+
+#### 2. Count failures at the edge (fail2ban example)
+
+credcheck cannot see the failures, so they must be reported from where they
+occur. Point fail2ban at the PgBouncer log.
+
+Filter (adjust the regex to your PgBouncer version's log format):
+```
+# /etc/fail2ban/filter.d/pgbouncer-credcheck.conf
+[Definition]
+failregex = login failed: .*"?<F-USER>[^"@ ]+</F-USER>"?@<HOST>
+            password authentication failed for user "?<F-USER>[^"]+</F-USER>"?
+```
+
+Action — report each failure to credcheck (injection-safe via psql `:'u'`):
+```
+# /etc/fail2ban/action.d/credcheck-report.conf
+[Definition]
+actionban = psql "host=PGHOST port=5432 user=f2b_reporter dbname=postgres" \
+              -X -q -v ON_ERROR_STOP=1 \
+              -c "SELECT credcheck_record_auth_failure(:'u')" -v u="<F-USER>"
+actionunban = psql "host=PGHOST port=5432 user=f2b_reporter dbname=postgres" \
+              -X -q -c "SELECT pg_banned_role_reset(:'u')" -v u="<F-USER>"
+```
+
+Grant the reporter role:
+```sql
+GRANT EXECUTE ON FUNCTION credcheck_record_auth_failure(name) TO f2b_reporter; -- superuser-only fn
+```
+(record_auth_failure enforces superuser() internally; run the reporter as a
+superuser, or wrap it in a SECURITY DEFINER function you own and grant that.)
+
+Set fail2ban `maxretry = 1` so every failure is forwarded and credcheck owns the
+threshold via `credcheck.max_auth_failure`.
 
 ### [Examples](#examples)
 
@@ -260,6 +396,28 @@ ERROR:  require a VALID UNTIL option with a date not beyond 180 days
 When a user change its password and a VALID UNTIL clause is not set, credcheck
 will set the valid until date to `now() + credcheck.password_valid_until`
 
+The `credcheck.password_valid_min` setting can be used to give newly created
+roles a shorter VALID UNTIL window than the one applied when an existing role
+changes its password. When it is greater than zero, it overrides
+`credcheck.password_valid_until` for `CREATE ROLE` statements only. This is
+handy to force new users to change their password within a few days, for
+example when the client tool (DBeaver, pgAdmin, ...) does not support
+`credcheck.password_change_first_login`:
+```
+postgres=# SET credcheck.password_valid_min = 5;    -- new roles: 5 days
+postgres=# SET credcheck.password_valid_until = 365; -- password changes: 1 year
+postgres=# SET credcheck.password_valid_max = 370;   -- never beyond ~1 year
+
+-- new role, no VALID UNTIL given: automatically set to now() + 5 days
+postgres=# CREATE USER remi PASSWORD 'FirstPass1';
+
+-- when remi later changes its password without a VALID UNTIL clause,
+-- credcheck sets it to now() + 365 days instead of 5.
+postgres=# ALTER USER remi PASSWORD 'ChosenPass1';
+```
+When `credcheck.password_valid_min` is left to 0 (the default), `CREATE ROLE`
+keeps using `credcheck.password_valid_until` exactly as before.
+
 If you have enabled the use of cracklib to check the easiness of a password
 you could have this kind of messages:
 ```
@@ -276,7 +434,7 @@ But one thing was missing, there was no password reuse policy enforcement. That 
 
 The credcheck extension adds the "Password Reuse Policy" in release 1.0. To used this feature, the credcheck extension MUST be added to `shared_preload_libraries` configuration option.
 
-All users passwords are historicized in shared memory together with the timestamps of when these passwords were set. The passwords history is saved into a file named `$PGDATA/pg_password_history` to be reloaded in shared memory at startup. This file must be part of your backups if you don't want to loose the password history, hopefully pg_basebackup will take care of it. Passwords are stored and compared as sha256 hashes, never in plain text.
+All users passwords are historicized in shared memory together with the timestamps of when these passwords were set. The passwords history is saved into a file named `$PGDATA/pg_password_history` to be reloaded in shared memory at startup. This file must be part of your backups if you don't want to loose the password history, hopefully pg_basebackup will take care of it. Starting from PostgreSQL 15, the password history is also replication-aware: a custom WAL resource manager ships every mutation (add, remove, rename, reset, timestamp update) to standbys through the usual WAL streaming, so the history stays consistent across a primary/replica setup and survives a failover. Passwords are stored and compared as sha256 hashes, never in plain text.
 
 The password history size is set to 65535 records by default and can be adjusted using the `credcheck.history_max_size` configuration directive. Change of this GUC require a PostgreSQL restart. One record in the history takes 144 bytes, so the default is to allocate around 10 MB of additional shared memory for the password history.
 
@@ -297,7 +455,8 @@ restrict new passwords from being chosen from this history:
 To be able to list the content of the history a view is provided in the database you have created
 the credcheck extension. The view is named `public.pg_password_history`. Only a superuser can see the content
 of this view or call the underlying `public.pg_password_history()` function, since the stored hashes, which
-include the current passwords, could be used to recover the passwords offline.
+include the current passwords, could be used to recover the passwords offline. On Greengage 7X, members of
+the `pg_read_all_stats` role can see the content of the view too.
 
 A superuser can also reset the content of the password history by calling a function named `public.pg_password_history_reset()`. If it is called without an argument, all the passwords history will be cleared. To only remove the records registered for a single user, just pass his name as parameter. This function returns the number of records removed from the history.
 
@@ -577,20 +736,33 @@ libraries already listed there, and restart the cluster:
 	gpconfig -c shared_preload_libraries -v '<current libraries>,credcheck'
 	gpstop -ar
 
-The checks, the password reuse policy, the authentication failure ban and the
-forced password change work on the coordinator only. The functions changing
-the password history or the banned roles can't be executed on segments, for
-example when they are called for each row of a distributed table. The `credcheck_internal.force_change_password` setting of a
+The checks, the password reuse policy, the authentication failure ban, the
+forced password change and the last-login history work on the coordinator
+only. The functions changing the password history or the banned roles, and
+`credcheck_is_banned()`, can't be executed on segments, for example when they
+are called for each row of a distributed table. The background worker of the
+last-login history is started on the coordinator only, whatever
+`credcheck.lastlog` is on segments. The `credcheck_internal.force_change_password` setting of a
 role is changed on the coordinator and on segments, as `ALTER ROLE ... SET`
 does.
+
+Segments log the statements dispatched by the coordinator, so add `credcheck`
+to `shared_preload_libraries` on segments too, otherwise the passwords aren't
+masked in their logs. The arguments of `pg_check_password()` are masked in the
+log and in the last-login history, as the `PASSWORD` clause is. The last-login
+history masks the passwords whatever `credcheck.no_password_logging` is.
+Only the messages written to the log are masked, the text of the statement
+itself is not, so the passwords are still shown in clear text in
+`pg_stat_activity` and in the query history of gpperfmon.
 
 The password history is not replicated to the standby coordinator.
 `gpinitstandby` copies the `pg_password_history` file of the coordinator data
 directory, so after `gpactivatestandby` the password history is the one the
 coordinator had when the standby was initialized. The banned roles are kept in
 shared memory only, so they are lost on restart and after `gpactivatestandby`.
-`gpexpand` copies the password history file to the new segments, it is removed
-there when the segment is started with credcheck in `shared_preload_libraries`.
+`gpexpand` copies the files of the password history and of the last-login
+history to the new segments, they are removed there when the segment is
+started with credcheck in `shared_preload_libraries`.
 
 Greengage 6 and 7 are based on PostgreSQL older than 14, where the password
 history holds HMAC-SHA256 hashes of the passwords salted with the role name, as

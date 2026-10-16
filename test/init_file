@@ -6,6 +6,8 @@ m/^HINT:  Process \d+ will wait for gp_debug_linger=\d+ seconds before terminati
 m/^Note that its locks and other resources will not be released until then\./
 -- end_matchignore
 -- start_matchsubs
+m/^LOG:  DTM protocol command '.*' for gid = \d+(-\d+)?$/
+s/gid = \d+(-\d+)?$/gid = XXX/
 m/^psql: error: /
 s/^psql: error: /psql: /
 -- end_matchsubs
