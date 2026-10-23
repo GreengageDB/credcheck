@@ -18,7 +18,8 @@ DATA = $(wildcard updates/*--*.sql) sql/$(EXTENSION)--$(EXTVERSION).sql
 REGRESS_OPTS  = --inputdir=test --load-extension=credcheck
 TESTS = 01_username 02_password 03_rename 04_alter_pwd \
 	05_reuse_history 06_reuse_interval 07_valid_until \
-	08_first_login 09_plpgsql
+	08_first_login 09_plpgsql 10_no_password_logging \
+	11_max_auth_pgbouncer
 
 REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 
@@ -27,14 +28,12 @@ REGRESS = $(patsubst test/sql/%.sql,%,$(TESTS))
 REGRESS_OPTS += --init-file=test/init_file
 TESTS := setup $(TESTS) gg_01_banned_role gg_02_coordinator_only gg_03_update \
 	gg_04_multi_statement gg_05_superuser_nocheck \
-	gg_06_password_history_access teardown
+	gg_06_password_history_access gg_07_lastlog_access \
+	gg_08_password_logging_segments gg_09_lastlog teardown
 # The version shipped with Greengage 6X, to update from it
 DATA += sql/$(EXTENSION)--4.6.0.sql
 
 PG_CONFIG = pg_config
-
-# Extract the major version number
-PG_MAJORVERSION := $(shell $(PG_CONFIG) --version | sed -e 's/^[a-zA-Z ]*//' -e 's/\..*//')
 
 TAP_TESTS = 1
 
