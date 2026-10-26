@@ -27,34 +27,38 @@ SELECT proname, proexeclocation IN ('m', 'c') AS on_coordinator FROM pg_proc
  pg_password_history | t
 (2 rows)
 
--- The updated extension has the same objects as a freshly created one
-CREATE TEMP TABLE cc_updated AS
-  SELECT pg_describe_object(classid, objid, objsubid) AS obj FROM pg_depend
+-- The updated extension has the same objects as a freshly created one, with
+-- the same privileges and execution locations
+CREATE TEMP VIEW cc_objects AS
+  SELECT pg_describe_object(classid, objid, objsubid)
+      || coalesce(' ' || (SELECT coalesce(proacl::text, '') || ' '
+                              || proexeclocation FROM pg_proc
+                          WHERE classid = 'pg_proc'::regclass AND oid = objid), '')
+      || coalesce(' ' || (SELECT coalesce(relacl::text, '') FROM pg_class
+                          WHERE classid = 'pg_class'::regclass AND oid = objid), '')
+      AS obj
+  FROM pg_depend
   WHERE refclassid = 'pg_extension'::regclass AND deptype = 'e'
-    AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'credcheck')
-  DISTRIBUTED RANDOMLY;
+    AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'credcheck');
+CREATE TEMP TABLE cc_updated AS SELECT obj FROM cc_objects DISTRIBUTED RANDOMLY;
 DROP EXTENSION credcheck;
 CREATE EXTENSION credcheck;
-(SELECT obj FROM cc_updated
-  EXCEPT SELECT pg_describe_object(classid, objid, objsubid) FROM pg_depend
-  WHERE refclassid = 'pg_extension'::regclass AND deptype = 'e'
-    AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'credcheck'))
+(SELECT obj FROM cc_updated EXCEPT SELECT obj FROM cc_objects)
 UNION ALL
-(SELECT pg_describe_object(classid, objid, objsubid) FROM pg_depend
-  WHERE refclassid = 'pg_extension'::regclass AND deptype = 'e'
-    AND refobjid = (SELECT oid FROM pg_extension WHERE extname = 'credcheck')
-  EXCEPT SELECT obj FROM cc_updated);
+(SELECT obj FROM cc_objects EXCEPT SELECT obj FROM cc_updated);
  obj 
 -----
 (0 rows)
 
 DROP TABLE cc_updated;
+DROP VIEW cc_objects;
 -- and works
 DROP EXTENSION credcheck;
 CREATE EXTENSION credcheck VERSION '4.6.0';
 ALTER EXTENSION credcheck UPDATE;
 SET credcheck.password_reuse_history = 1;
 CREATE USER cc_update WITH PASSWORD 'H8Hdre=S2';
+NOTICE:  resource queue required -- using default resource queue "pg_default"
 SELECT rolename FROM pg_password_history WHERE rolename = 'cc_update';
  rolename  
 -----------

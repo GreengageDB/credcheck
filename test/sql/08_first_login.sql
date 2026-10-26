@@ -9,3 +9,51 @@ SELECT count(DISTINCT gp_segment_id) = (SELECT count(*) FROM gp_segment_configur
   FROM gp_dist_random('pg_catalog.pg_db_role_setting')
   WHERE setrole = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname='aaa') AND 'credcheck_internal.force_change_password=true'=ANY(setconfig);
 DROP USER aaa;
+
+-- Enforcement when a forced role actually logs in.
+-- Create a forced role and reconnect as it so that
+-- credcheck_internal.force_change_password is applied at login, exactly as in
+-- production (the flag comes from pg_db_role_setting, not from a manual SET).
+SET credcheck.password_change_first_login = true;
+CREATE USER forced_login PASSWORD 'DummY1passWORD!';
+-- Greengage: let forced_login connect through the Unix socket, and remember
+-- the superuser, which is not postgres, to reconnect as it
+-- start_ignore
+\! sed -i -e '1i local all forced_login trust # credcheck test' -e '/ # credcheck test$/d' "$(psql -At -c 'SHOW hba_file' postgres)"
+\! gpstop -u
+-- end_ignore
+SELECT current_user AS superuser \gset
+\c - forced_login
+
+-- Session/transaction-control statements that drivers and connection poolers
+-- must be able to issue while establishing a session (pgbouncer varcache_apply,
+-- pgbouncer server_reset_query = DISCARD ALL, JDBC/libpq startup SETs). These
+-- must be allowed even though the role has not changed its password yet.
+SET client_encoding = 'UTF8';
+SET application_name = 'x';
+BEGIN;
+COMMIT;
+DISCARD ALL;
+
+-- The flag stays armed after DISCARD ALL (its default comes from the role
+-- settings), so real data access is still blocked -- and, unlike the swallowed
+-- pooler-setup error, this one reaches the client.
+SELECT 1;
+
+-- DDL and other utility statements remain blocked too.
+CREATE TABLE t_force (i int);
+
+-- A forced session must not be able to clear the flag itself.
+SET credcheck_internal.force_change_password = false;
+
+-- The password change itself is allowed and clears the forced state.
+ALTER USER forced_login PASSWORD 'BrandNew3passWORD!';
+SELECT 1 AS after_password_change;
+
+-- Reconnect as the superuser to clean up.
+\c - :superuser
+DROP USER forced_login;
+-- start_ignore
+\! sed -i '/ # credcheck test$/d' "$(psql -At -c 'SHOW hba_file' postgres)"
+\! gpstop -u
+-- end_ignore
